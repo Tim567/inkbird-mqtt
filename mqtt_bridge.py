@@ -14,6 +14,8 @@ Configuration is via environment variables:
     MQTT_BASE_TOPIC         state topic prefix (default: inkbird)
     MQTT_DISCOVERY_PREFIX   HA discovery prefix (default: homeassistant,
                              matches HA's default MQTT integration setting)
+    MQTT_OFFLINE_TIMEOUT    seconds without a reading before a device is
+                             marked unavailable in HA (default: 300)
 
 Usage:
     pip install -r requirements.txt
@@ -23,10 +25,12 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
 import sys
+import time
 
 import paho.mqtt.client as mqtt
 from inkbird_ble import SensorUpdate
@@ -38,9 +42,13 @@ MQTT_USERNAME = os.environ.get("MQTT_USERNAME")
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD")
 BASE_TOPIC = os.environ.get("MQTT_BASE_TOPIC", "inkbird")
 DISCOVERY_PREFIX = os.environ.get("MQTT_DISCOVERY_PREFIX", "homeassistant")
+OFFLINE_TIMEOUT = float(os.environ.get("MQTT_OFFLINE_TIMEOUT", "300"))
 STATUS_TOPIC = f"{BASE_TOPIC}/bridge/status"
+_AVAILABILITY_CHECK_INTERVAL = 30
 
 _announced: set[str] = set()
+_last_seen: dict[str, float] = {}
+_device_online: dict[str, bool] = {}
 
 
 def _slug(text: str) -> str:
@@ -49,6 +57,29 @@ def _slug(text: str) -> str:
 
 def _field_name(device_id: str | None, key: str) -> str:
     return f"{_slug(device_id)}_{key}" if device_id else key
+
+
+def _availability_topic(address: str) -> str:
+    return f"{BASE_TOPIC}/{_slug(address)}/availability"
+
+
+def _mark_online(client: mqtt.Client, address: str) -> None:
+    _last_seen[address] = time.monotonic()
+    if not _device_online.get(address):
+        client.publish(_availability_topic(address), "online", retain=True)
+        _device_online[address] = True
+        print(f"{address} is online")
+
+
+async def _availability_checker(client: mqtt.Client) -> None:
+    while True:
+        await asyncio.sleep(_AVAILABILITY_CHECK_INTERVAL)
+        now = time.monotonic()
+        for address, last_seen in list(_last_seen.items()):
+            if _device_online.get(address) and now - last_seen > OFFLINE_TIMEOUT:
+                client.publish(_availability_topic(address), "offline", retain=True)
+                _device_online[address] = False
+                print(f"{address} marked offline (no reading for over {OFFLINE_TIMEOUT:.0f}s)")
 
 
 def _publish_discovery(
@@ -75,7 +106,11 @@ def _publish_discovery(
         "object_id": unique_id,
         "state_topic": f"{BASE_TOPIC}/{slug}/state",
         "value_template": f"{{{{ value_json.{field} }}}}",
-        "availability_topic": STATUS_TOPIC,
+        "availability": [
+            {"topic": STATUS_TOPIC},
+            {"topic": _availability_topic(address)},
+        ],
+        "availability_mode": "all",
         "state_class": "measurement",
         "device": {
             "identifiers": [slug],
@@ -118,6 +153,7 @@ def _make_on_reading(client: mqtt.Client):
     def _on_reading(address: str, name: str | None, device_type: object, update: SensorUpdate) -> None:
         for device_key in update.entity_values:
             _publish_discovery(client, address, name, device_type, update, device_key)
+        _mark_online(client, address)
         _publish_state(client, address, update)
 
     return _on_reading
@@ -148,9 +184,13 @@ async def main() -> None:
     client.connect_async(MQTT_HOST, MQTT_PORT)
     client.loop_start()
 
+    checker_task = asyncio.create_task(_availability_checker(client))
     try:
         await INKBIRDScanner(_make_on_reading(client)).run()
     finally:
+        checker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await checker_task
         client.publish(STATUS_TOPIC, "offline", retain=True)
         client.loop_stop()
         client.disconnect()
