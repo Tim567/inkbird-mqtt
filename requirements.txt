@@ -1,0 +1,4 @@
+bleak>=0.22
+habluetooth>=3.0
+inkbird-ble==1.4.4
+paho-mqtt>=2.0

@@ -1,0 +1,19 @@
+[Unit]
+Description=INKBIRD BLE to MQTT bridge for Home Assistant
+After=network-online.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/inkbird-monitor
+Environment=MQTT_HOST=192.168.1.10
+Environment=MQTT_PORT=1883
+Environment=MQTT_USERNAME=changeme
+Environment=MQTT_PASSWORD=changeme
+ExecStart=/home/pi/inkbird-monitor/.venv/bin/python /home/pi/inkbird-monitor/mqtt_bridge.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
