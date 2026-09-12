@@ -92,7 +92,11 @@ def _publish_discovery(
         payload["enabled_by_default"] = False
 
     config_topic = f"{DISCOVERY_PREFIX}/sensor/{unique_id}/config"
-    client.publish(config_topic, json.dumps(payload), retain=True)
+    result = client.publish(config_topic, json.dumps(payload), retain=True)
+    if result.rc != mqtt.MQTT_ERR_SUCCESS:
+        print(f"Failed to publish discovery for {unique_id}: {mqtt.error_string(result.rc)}")
+    else:
+        print(f"Published discovery config for {unique_id} to {config_topic}")
     _announced.add(unique_id)
 
 
@@ -102,7 +106,12 @@ def _publish_state(client: mqtt.Client, address: str, update: SensorUpdate) -> N
         _field_name(device_key.device_id, device_key.key): sensor_value.native_value
         for device_key, sensor_value in update.entity_values.items()
     }
-    client.publish(f"{BASE_TOPIC}/{slug}/state", json.dumps(state, default=str), retain=True)
+    topic = f"{BASE_TOPIC}/{slug}/state"
+    result = client.publish(topic, json.dumps(state, default=str), retain=True)
+    if result.rc != mqtt.MQTT_ERR_SUCCESS:
+        print(f"Failed to publish to {topic}: {mqtt.error_string(result.rc)}")
+    else:
+        print(f"Published {topic}: {state}")
 
 
 def _make_on_reading(client: mqtt.Client):
@@ -114,6 +123,18 @@ def _make_on_reading(client: mqtt.Client):
     return _on_reading
 
 
+def _on_connect(client: mqtt.Client, userdata, flags, reason_code, properties) -> None:
+    if reason_code == 0:
+        print(f"Connected to MQTT broker at {MQTT_HOST}:{MQTT_PORT}")
+        client.publish(STATUS_TOPIC, "online", retain=True)
+    else:
+        print(f"MQTT connection failed: {reason_code}")
+
+
+def _on_disconnect(client: mqtt.Client, userdata, flags, reason_code, properties) -> None:
+    print(f"Disconnected from MQTT broker: {reason_code}")
+
+
 async def main() -> None:
     if not MQTT_HOST:
         sys.exit("MQTT_HOST environment variable is required")
@@ -121,10 +142,11 @@ async def main() -> None:
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
     if MQTT_USERNAME:
         client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+    client.on_connect = _on_connect
+    client.on_disconnect = _on_disconnect
     client.will_set(STATUS_TOPIC, "offline", retain=True)
     client.connect_async(MQTT_HOST, MQTT_PORT)
     client.loop_start()
-    client.publish(STATUS_TOPIC, "online", retain=True)
 
     try:
         await INKBIRDScanner(_make_on_reading(client)).run()
